@@ -1,0 +1,13 @@
+{
+  "name": "mano3d-articulada-vision-artificial",
+  "version": "1.0.0",
+  "description": "Servidor WebSocket para enviar datos de seguimiento de manos a la aplicación web 3D.",
+  "main": "udp_to_websocket.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "node udp_to_websocket.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
