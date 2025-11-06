@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <title>🖐️ Mano 3D - Rotaciones Relativas (Pose Base)</title>
+    <style>
+      body { margin: 0; overflow: hidden; background: #000; font-family: Arial, sans-serif; }
+      #panel {
+        position: absolute; left: 10px; top: 10px; width: 260px; background: rgba(20,20,20,0.95);
+        color:#fff; padding:10px; z-index: 10; box-shadow: 0 2px 10px rgba(0,0,0,0.6);
+      }
+      #panel h3 { margin:6px 0; font-size:14px; }
+      .row { margin:6px 0; }
+      input[type="range"] { width:100%; }
+      button { width:100%; padding:6px; margin-top:8px; background:#444; color:#fff; border:none; cursor:pointer; }
+      button:hover { background:#666; }
+      #video { position: absolute; right:0; top:0; width:35%; transform: scaleX(-1); border-left:2px solid #222; z-index:5; }
+    </style>
+  </head>
+  <body>
+    <div id="panel">
+      <h3>⚙️ Ajustes</h3>
+
+      <div class="row">
+        <label>Intensidad (0..3): <span id="scaleVal">1.0</span></label>
+        <input id="scale" type="range" min="0" max="3" step="0.05" value="1">
+      </div>
+
+      <div class="row">
+        <label>Suavizado (0..1): <span id="smoothVal">0.15</span></label>
+        <input id="smooth" type="range" min="0" max="1" step="0.01" value="0.15">
+      </div>
+
+      <div class="row">
+        <label><input id="invertX" type="checkbox"> Invertir X</label><br>
+        <label><input id="invertY" type="checkbox"> Invertir Y</label><br>
+        <label><input id="invertZ" type="checkbox"> Invertir Z</label>
+      </div>
+
+      <div class="row">
+        <label>Referencia de hueso (prueba si Y/Z funciona mejor)</label>
+        <select id="refAxis">
+          <option value="Y" selected>Y (0,1,0)</option>
+          <option value="Z">Z (0,0,1)</option>
+          <option value="X">X (1,0,0)</option>
+        </select>
+      </div>
+
+      <button id="resetPose">🔄 Resetear a pose base</button>
+      <button id="recenter">⤴️ Re-centar mano</button>
+    </div>
+
+    <video id="video" autoplay playsinline></video>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js",
+          "three/examples/jsm/loaders/GLTFLoader.js": "https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/loaders/GLTFLoader.js",
+          "three/examples/jsm/controls/OrbitControls.js": "https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/controls/OrbitControls.js"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+      import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+
+      // === Escena y cámara ===
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x111111);
+
+      const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+      camera.position.set(0, 1.2, 6);
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+
+      scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+      const dir = new THREE.DirectionalLight(0xffffff, 1.6);
+      dir.position.set(5, 5, 5);
+      scene.add(dir);
+
+      // axes helper
+      const axes = new THREE.AxesHelper(2);
+      scene.add(axes);
+
+      // === Variables globales ===
+      let hand = null;
+      const bones = {}; // name -> bone
+      const basePose = {}; // name -> quaternion (base)
+      const basePosition = {}; // optional
+      let ws = null;
+
+      // Panel controls
+      const scaleInput = document.getElementById('scale');
+      const scaleVal = document.getElementById('scaleVal');
+      const smoothInput = document.getElementById('smooth');
+      const smoothVal = document.getElementById('smoothVal');
+      const invertX = document.getElementById('invertX');
+      const invertY = document.getElementById('invertY');
+      const invertZ = document.getElementById('invertZ');
+      const refAxisSel = document.getElementById('refAxis');
+      const video = document.getElementById('video');
+
+      let scaleFactor = parseFloat(scaleInput.value);
+      let smoothFactor = parseFloat(smoothInput.value);
+      const invert = { x: 1, y: 1, z: 1 };
+
+      // === Cargar modelo ===
+      const loader = new GLTFLoader();
+      loader.load('./rigged_hand.glb',
+        (gltf) => {
+          hand = gltf.scene;
+          // Ajusta escala/posición inicial según tu modelo:
+          hand.scale.set(10, 10, 10);
+          hand.position.set(0, -1, 0);
+
+          // Intenta orientar correctamente la mano; si queda invertida prueba otras combinaciones
+          hand.rotation.set(Math.PI / 2, 0, Math.PI);
+
+          scene.add(hand);
+
+          // Recorrer huesos y guardar pose base
+          hand.traverse((o) => {
+            if (o.isBone) {
+              bones[o.name] = o;
+              basePose[o.name] = o.quaternion.clone();
+              basePosition[o.name] = o.position.clone();
+            }
+          });
+
+          console.log('🦴 Huesos detectados:', Object.keys(bones));
+          console.log('✅ Pose base guardada para cada hueso');
+        },
+        undefined,
+        (err) => console.error('❌ Error cargando GLB:', err)
+      );
+
+      // === Webcam espejo para comparacion ===
+      navigator.mediaDevices.getUserMedia({ video: true })
+        .then(s => video.srcObject = s)
+        .catch(e => console.warn('No se pudo abrir webcam:', e));
+
+      // === WebSocket (UDP->WS backend enfocado en localhost:8080) ===
+      function openWS() {
+        ws = new WebSocket('ws://localhost:8080');
+        ws.onopen = () => console.log('✅ WebSocket conectado');
+        ws.onerror = (e) => console.warn('WS error', e);
+        ws.onclose = () => {
+          console.log('🔌 WS cerrado - reintentando en 2s');
+          setTimeout(openWS, 2000);
+        };
+        ws.onmessage = (m) => {
+          if (!hand) return;
+          try {
+            const data = JSON.parse(m.data);
+            if (!data.landmarks) return;
+            applyLandmarksToBones(data.landmarks);
+          } catch (err) {
+            console.warn('⚠️ Error procesando mensaje WS:', err);
+          }
+        };
+      }
+      openWS();
+
+      // === Utilidades ===
+      function getRefVector() {
+        const sel = refAxisSel.value;
+        if (sel === 'X') return new THREE.Vector3(1, 0, 0);
+        if (sel === 'Z') return new THREE.Vector3(0, 0, 1);
+        return new THREE.Vector3(0, 1, 0); // Y por defecto
+      }
+
+      function applyLandmarksToBones(landmarks) {
+        // actualizar inversores
+        invert.x = invertX.checked ? -1 : 1;
+        invert.y = invertY.checked ? -1 : 1;
+        invert.z = invertZ.checked ? -1 : 1;
+
+        // parámetros ajustables
+        scaleFactor = parseFloat(scaleInput.value);
+        smoothFactor = parseFloat(smoothInput.value);
+
+        const ref = getRefVector();
+
+        // Map del rig -> pares de landmarks (hadado por tu modelo observado)
+        const fingerMap = [
+          ['thumb000', 1, 2],
+          ['thumb001', 2, 3],
+          ['thumb002', 3, 4],
+
+          ['index000', 5, 6],
+          ['index001', 6, 7],
+          ['index002', 7, 8],
+
+          ['middle000', 9, 10],
+          ['middle001', 10, 11],
+          ['middle002', 11, 12],
+
+          ['ring000', 13, 14],
+          ['ring001', 14, 15],
+          ['ring002', 15, 16],
+
+          ['pinky000', 17, 18],
+          ['pinky001', 18, 19],
+          ['pinky002', 19, 20]
+        ];
+
+        // Muñeca: no mover la posición base drásticamente, solo ligera orientación
+        // (usamos 0->9 para orientación aproximada)
+        if (bones['Bone'] && landmarks[0] && landmarks[9]) {
+          const v0 = new THREE.Vector3(landmarks[0].x * invert.x, landmarks[0].y * invert.y, landmarks[0].z * invert.z);
+          const v9 = new THREE.Vector3(landmarks[9].x * invert.x, landmarks[9].y * invert.y, landmarks[9].z * invert.z);
+          const dirW = new THREE.Vector3().subVectors(v9, v0).normalize();
+
+          const qDeltaW = new THREE.Quaternion().setFromUnitVectors(ref, dirW);
+
+          // Escalar la influencia del delta (interpolando entre identidad y qDeltaW)
+          const influenceW = Math.min(1, scaleFactor * 0.25);
+          const qApplyW = new THREE.Quaternion().slerpQuaternions(new THREE.Quaternion(), qDeltaW, influenceW);
+
+          const base = basePose['Bone'] || bones['Bone'].quaternion.clone();
+          const desired = base.clone().multiply(qApplyW);
+
+          // suavizado
+          bones['Bone'].quaternion.slerp(desired, Math.max(0.02, smoothFactor));
+        }
+
+        // Aplicar a cada hueso de los dedos de forma relativa a su pose base
+        for (const [name, a, b] of fingerMap) {
+          const bone = bones[name];
+          if (!bone) continue;
+          if (!landmarks[a] || !landmarks[b]) continue;
+
+          const p1 = new THREE.Vector3(landmarks[a].x * invert.x, landmarks[a].y * invert.y, landmarks[a].z * invert.z);
+          const p2 = new THREE.Vector3(landmarks[b].x * invert.x, landmarks[b].y * invert.y, landmarks[b].z * invert.z);
+          const dir = new THREE.Vector3().subVectors(p2, p1);
+
+          if (dir.lengthSq() < 1e-6) continue;
+          dir.normalize();
+
+          // calcular delta quaternion que rota 'ref' -> dir
+          const qDelta = new THREE.Quaternion().setFromUnitVectors(ref, dir);
+
+          // Escalar la influencia del delta (interpolar entre identidad y qDelta) para controlar intensidad
+          const influence = Math.min(1, scaleFactor * 0.33); // ajustable
+          const qScaled = new THREE.Quaternion().slerpQuaternions(new THREE.Quaternion(), qDelta, influence);
+
+          // desired = basePose * qScaled
+          const baseQ = basePose[name] ? basePose[name].clone() : bone.quaternion.clone();
+          const desiredQ = baseQ.clone().multiply(qScaled);
+
+          // suavizado: slerp desde la rotación actual hacia desired
+          const alpha = Math.max(0.02, smoothFactor); // evitar 0 exacto
+          bone.quaternion.slerp(desiredQ, alpha);
+        }
+      }
+
+      // === Reset pose base (restablecer a la pose guardada) ===
+      document.getElementById('resetPose').onclick = () => {
+        if (!hand) return;
+        Object.keys(bones).forEach((n) => {
+          const b = bones[n];
+          if (basePose[n]) b.quaternion.copy(basePose[n]);
+          if (basePosition[n]) b.position.copy(basePosition[n]);
+        });
+        console.log('Pose base restaurada');
+      };
+
+      document.getElementById('recenter').onclick = () => {
+        if (!hand) return;
+        hand.position.set(0, -1, 0);
+        hand.rotation.set(Math.PI / 2, 0, Math.PI);
+        console.log('Hand recentered');
+      };
+
+      // UI listeners
+      scaleInput.oninput = () => { scaleVal.textContent = scaleInput.value; };
+      smoothInput.oninput = () => { smoothVal.textContent = smoothInput.value; };
+
+      // === Loop ===
+      function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+      }
+      animate();
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>
+
